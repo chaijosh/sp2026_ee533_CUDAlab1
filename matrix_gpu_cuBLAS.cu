@@ -1,43 +1,8 @@
-#include <stdio.h> 
-#include <stdlib.h> 
-#include <time.h> 
- 
-#define TILE_WIDTH 16
- 
-__global__ void matrixMultiplyTiled(float *A, float *B, float *C, int N) { 
-    __shared__ float ds_A[TILE_WIDTH][TILE_WIDTH]; 
-    __shared__ float ds_B[TILE_WIDTH][TILE_WIDTH]; 
- 
-    int bx = blockIdx.x; int by = blockIdx.y; 
-    int tx = threadIdx.x; int ty = threadIdx.y; 
- 
-    int Row = by * TILE_WIDTH + ty; 
-    int Col = bx * TILE_WIDTH + tx; 
- 
-    float Pvalue = 0.0; 
-    for (int m = 0; m < (N + TILE_WIDTH - 1) / TILE_WIDTH; ++m) { 
-        if (Row < N && (m*TILE_WIDTH+tx) < N) 
-            ds_A[ty][tx] = A[Row * N + m * TILE_WIDTH + tx]; 
-        else 
-            ds_A[ty][tx] = 0.0f; 
- 
-        if (Col < N && (m*TILE_WIDTH+ty) < N) 
-            ds_B[ty][tx] = B[(m*TILE_WIDTH + ty) * N + Col]; 
-        else 
-            ds_B[ty][tx] = 0.0f; 
- 
-        __syncthreads(); 
- 
-        for (int k = 0; k < TILE_WIDTH; ++k) 
-            Pvalue += ds_A[ty][k] * ds_B[k][tx]; 
-        __syncthreads(); 
-    } 
- 
-    if (Row < N && Col < N) 
-        C[Row * N + Col] = Pvalue; 
-}
- 
-int main(int argc, char **argv) { 
+#include <stdio.h>
+#include <stdlib.h>
+#include <cublas_v2.h>
+
+int main(int argc, char **argv) {
     int N = (argc > 1) ? atoi(argv[1]) : 1024; // allow matrix size as input 
     size_t size = N * N * sizeof(float); 
  
@@ -59,12 +24,13 @@ int main(int argc, char **argv) {
     // Copy contents of A and B to GPU memory
     cudaMemcpy(gpuA, A, size, cudaMemcpyHostToDevice);
     cudaMemcpy(gpuB, B, size, cudaMemcpyHostToDevice);
- 
-    // Define the grid and block dimensions
-    // 16 is chosen as it is used for tile size in subsequent parts
-    dim3 block(16, 16);
-    dim3 grid((N + block.x-1) / block.x, (N + block.y) / block.y);
 
+    // Create cuBLAS struct
+    cublasHandle_t cublas1;
+    cublasCreate(&cublas1);
+    
+    // initialize alpha and beta (multiplication weights during matmult operations)
+    float alpha = 1.0f, beta = 0.0f;
 
     // Measure time by using CUDA events, because Naive code seemed faster with smaller N values
     // possible because small N means everything fits in cache, and tiling seemed slower due to:
@@ -73,11 +39,34 @@ int main(int argc, char **argv) {
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
-
-    clock_t start_cpu = clock();  
     
+    // Apparently, GPU resources required for this function are in sleep mode at 
+    // the beginning of execution, and if I run this only once, execution times are
+    // very high (80ms for N=1024)...
+    
+     // I realized this when I measured the time taken for 2 function calls, and it came out
+     // identical to execution time of single function call.
+     // Calling once before measuring execution time seems to enable the GPU HW, and the subsequent 
+     // function calls are fast (as expected)
+    cublasSgemm(cublas1,  
+            CUBLAS_OP_N, CUBLAS_OP_N,  
+            N, N, N,  
+            &alpha,  
+            gpuB, N,  
+            gpuA, N,  
+            &beta,  
+            gpuC, N);
+    
+    clock_t start_cpu = clock();
     cudaEventRecord(start);
-    matrixMultiplyTiled<<<grid, block>>>(gpuA, gpuB, gpuC, N);
+    cublasSgemm(cublas1,  
+            CUBLAS_OP_N, CUBLAS_OP_N,  
+            N, N, N,  
+            &alpha,  
+            gpuB, N,  
+            gpuA, N,  
+            &beta,  
+            gpuC, N);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     clock_t stop_cpu = clock();
@@ -94,6 +83,7 @@ int main(int argc, char **argv) {
     // Deallocate both CPU and GPU memory
     free(A); free(B); free(C); 
     cudaFree(gpuA); cudaFree(gpuB); cudaFree(gpuC);
+    cublasDestroy(cublas1);
 
     return 0; 
 }

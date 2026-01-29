@@ -41,19 +41,34 @@ int main(int argc, char **argv) {
  
     // Define the grid and block dimensions
     // 16 is chosen as it is used for tile size in subsequent parts
-    dim3 grid(16, 16);
-    dim3 block((size + 15) / 16, (size + 15) / 16);
+    dim3 block(16, 16);
+    dim3 grid((N + block.x-1) / block.x, (N + block.y) / block.y);
 
-    clock_t start = clock(); 
-    matrixMultiplyGPU<<<grid, block>>>(gpuA, gpuB, gpuC, size);
-    // Wait for GPU
-    cudaDeviceSynchronize();
-    clock_t end = clock(); 
-    cudaMemcpy(C, gpuC, size, cudaMemcpyDeviceToHost);
+
+    // Measure time by using CUDA events, because Naive code seemed faster with smaller N values
+    // possible because small N means everything fits in cache, and tiling seemed slower due to:
+    // 1. additional memory transfers to shared memory
+    // 2. added sync overhead for threads
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    clock_t start_cpu = clock();  
     
-    double elapsed = (double)(end - start) / CLOCKS_PER_SEC; 
-    printf("GPU execution time (N=%d): %f seconds\n", N, elapsed); 
- 
+    cudaEventRecord(start);
+    matrixMultiplyGPU<<<grid, block>>>(gpuA, gpuB, gpuC, N);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    clock_t stop_cpu = clock();
+
+    double elapsed_cpu = (double)(stop_cpu - start_cpu)/CLOCKS_PER_SEC;
+    float elapsed_gpu = 0;
+    cudaEventElapsedTime(&elapsed_gpu, start, stop);
+
+    // Bring results back and print
+    cudaMemcpy(C, gpuC, size, cudaMemcpyDeviceToHost);
+    printf("CPU execution time (N=%d): %f milliseconds\n", N, elapsed_cpu*1000);
+    printf("GPU execution time (N=%d): %f milliseconds\n", N, elapsed_gpu);
 
     // Deallocate both CPU and GPU memory
     free(A); free(B); free(C); 
